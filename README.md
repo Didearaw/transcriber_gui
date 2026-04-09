@@ -143,7 +143,7 @@ YouTube активно борется с автоматическим скачи
 Скрипт написан на **Python 3** с использованием библиотек:
 
 - [`tkinter`](https://docs.python.org/3/library/tkinter.html) — графический интерфейс.
-- [`yt-dlp-ytse`](https://github.com/yt-dlp/yt-dlp-ytse) — скачивание видео с обходом блокировок.
+- [`yt-dlp-ytse`](https://github.com/coletdjnz/yt-dlp-ytse) — скачивание видео с обходом блокировок.
 - [`openai-whisper`](https://github.com/openai/whisper) — распознавание речи.
 - [`imageio-ffmpeg`](https://github.com/imageio/imageio-ffmpeg) — встроенный ffmpeg для обработки аудио.
 
