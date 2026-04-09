@@ -1,3 +1,10 @@
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![Whisper](https://img.shields.io/badge/Whisper-openai-orange?logo=openai)](https://github.com/openai/whisper)
+[![yt-dlp](https://img.shields.io/badge/yt--dlp--ytse-red?logo=youtube)](https://github.com/yt-dlp/yt-dlp-ytse)
+[![FFmpeg](https://img.shields.io/badge/FFmpeg-included-green?logo=ffmpeg)](https://ffmpeg.org/)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](https://github.com/yourusername/yourrepo)
+[![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
+
 # 🎬 YouTube Transcriber & Video Downloader
 
 Простой и мощный графический инструмент для скачивания видео с YouTube, извлечения аудиодорожки и автоматической расшифровки речи с помощью нейросети OpenAI Whisper.
