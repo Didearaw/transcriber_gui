@@ -7,7 +7,7 @@ import subprocess
 import json
 import importlib
 import shutil
-import glob
+import re
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(sys.argv[0]))
 
@@ -108,6 +108,8 @@ class App:
         self.audio_file_path = tk.StringVar()
 
         self.model = None
+        self.model_lock = threading.Lock()
+        self._busy = False
 
         self.create_widgets()
 
@@ -247,11 +249,33 @@ class App:
             self.audio_file_path.set(path)
 
     def start(self):
+        if self._busy:
+            return
         mode = self.mode.get()
+        url = self.url.get().strip()
+        audio_path = self.audio_file_path.get()
+        if mode != "transcribe_only" and not url:
+            messagebox.showerror("Ошибка", "Вставьте ссылку на YouTube")
+            return
+        if mode == "transcribe_only" and (not audio_path or not os.path.exists(audio_path)):
+            messagebox.showerror("Ошибка", "Выберите существующий аудиофайл")
+            return
+
         self.config["cookies_file"] = self.cookies_path.get()
         self.config["mode"] = mode
         save_config(self.config)
+
+        self._busy = True
+        self.start_btn.config(state=tk.DISABLED)
         threading.Thread(target=self.run, daemon=True).start()
+
+    def load_model(self):
+        """Потокобезопасная загрузка модели Whisper (только один раз)."""
+        with self.model_lock:
+            if self.model is None:
+                model_name = self.combo.get()
+                self.model = whisper.load_model(model_name)
+            return self.model
 
     def run(self):
         try:
@@ -272,7 +296,7 @@ class App:
 
             if mode == "download_only":
                 self.set("Готово", 100)
-                messagebox.showinfo("OK",
+                self.show_info("OK",
                     f"Скачивание завершено!\n\n"
                     f"Видео сохранено в:\n{video_file}\n\n"
                     f"Аудио сохранено в:\n{audio_file}"
@@ -280,11 +304,10 @@ class App:
                 return
 
             self.set("Загрузка модели Whisper...", 40)
-            if not self.model:
-                self.model = whisper.load_model(self.combo.get())
+            model = self.load_model()
 
             self.set("Распознавание речи...", 60)
-            result = self.model.transcribe(audio_file, language="ru")
+            result = model.transcribe(audio_file, language="ru")
             text = result["text"]
 
             safe_title = "".join(c for c in video_title if c.isalnum() or c in (' ', '-', '_')).rstrip()
@@ -295,29 +318,39 @@ class App:
                 f.write(text)
 
             self.set("Готово", 100)
-            messagebox.showinfo("OK",
+            self.show_info("OK",
                 f"Успешно!\n\n"
                 f"Видео сохранено в:\n{video_file}\n\n"
                 f"Аудио сохранено в:\n{audio_file}\n\n"
                 f"Текст сохранён в:\n{out_text}"
             )
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Произошла ошибка:\n{str(e)}")
             self.set("Ошибка", 0)
+            self.show_error("Ошибка", f"Произошла ошибка:\n{str(e)}")
+        finally:
+            self._busy = False
+            self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+
+    def show_info(self, title, msg):
+        """Показ информационного окна только из потока Tkinter."""
+        self.root.after(0, lambda: messagebox.showinfo(title, msg))
+
+    def show_error(self, title, msg):
+        """Показ окна ошибки только из потока Tkinter."""
+        self.root.after(0, lambda: messagebox.showerror(title, msg))
 
     def transcribe_audio_file(self, audio_path):
         self.set("Загрузка модели...", 30)
-        if not self.model:
-            self.model = whisper.load_model(self.combo.get())
+        model = self.load_model()
         self.set("Распознавание...", 50)
-        result = self.model.transcribe(audio_path, language="ru")
+        result = model.transcribe(audio_path, language="ru")
         text = result["text"]
         base = os.path.splitext(os.path.basename(audio_path))[0]
         out_text = os.path.join(TEXT_FOLDER, f"{base}.txt")
         with open(out_text, "w", encoding="utf-8") as f:
             f.write(text)
         self.set("Готово", 100)
-        messagebox.showinfo("OK", f"Расшифровка завершена!\n\nФайл сохранён:\n{out_text}")
+        self.show_info("OK", f"Расшифровка завершена!\n\nФайл сохранён:\n{out_text}")
 
     def download(self, url):
         cookies_file = self.cookies_path.get()
@@ -345,12 +378,12 @@ class App:
             'format': (
                 'bestvideo[height>=720][vcodec^=avc1]+bestaudio[ext=m4a]/'
                 'bestvideo[height>=720]+bestaudio/'
-                'bestvideo+bestaudio/best'
+                'best[height>=720]/best'
             ),
-            'format_sort': ['res:2160', 'codec:avc'],
             'merge_output_format': 'mp4',
             'outtmpl': outtmpl_video,
-            'quiet': False,
+            'quiet': True,
+            'no_warnings': True,
             'noplaylist': True,
             'socket_timeout': 30,
             'extractor_args': {
@@ -358,12 +391,6 @@ class App:
                     'player_client': ['android', 'web', 'mweb', 'tv'],
                 }
             },
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav',
-                'preferredquality': '192',
-            }],
-            'keepvideo': True,
         }
         ydl_opts.update(extra_opts)
 
@@ -371,74 +398,117 @@ class App:
             info = ydl.extract_info(url, download=True)
             video_title = info.get('title', 'transcript')
 
-        # После скачивания находим финальные файлы
+        # После скачивания находим финальный видеофайл
         video_file = self.find_final_video(VIDEO_FOLDER)
         if not video_file:
             raise Exception("Финальный видеофайл не найден")
 
-        audio_file = self.find_audio_for_video(video_file)
-        if not audio_file:
-            raise Exception("Аудиофайл не найден")
+        # Аудио скачиваем ОТДЕЛЬНО в формате WAV: постпроцессор извлечения аудио
+        # не конфликтует с объединением видео+аудио (в старом варианте m4a-аудио
+        # могло переименовываться/удаляться при merge, и WAV мог не создаться).
+        audio_file = self.download_audio(url, video_title, extra_opts)
 
-        # Перемещаем аудио в AUDIO_FOLDER
-        dest_audio = os.path.join(AUDIO_FOLDER, os.path.basename(audio_file))
-        if not os.path.exists(dest_audio):
-            shutil.move(audio_file, dest_audio)
-        else:
-            # Если файл уже есть, заменяем
-            os.remove(dest_audio)
-            shutil.move(audio_file, dest_audio)
-        audio_file = dest_audio
-
-        # Удаляем временные файлы, оставляя только финальное видео и перемещённое аудио
-        self.cleanup_temp_files(VIDEO_FOLDER, keep=[video_file])
+        # Удаляем временные файлы из папки видео
+        self.cleanup_temp_files(VIDEO_FOLDER)
 
         return audio_file, video_file, video_title
 
-    def cleanup_temp_files(self, folder, keep=None):
-        """Удаляет временные файлы .f*.mp4 и .m4a, оставляя финальное видео."""
-        if keep is None:
-            keep = []
-        for f in os.listdir(folder):
-            if f.startswith('.') or f in keep:
-                continue
-            full = os.path.join(folder, f)
-            # Удаляем файлы с паттерном .fцифры.mp4 или .m4a (временные)
-            if '.f' in f and (f.endswith('.mp4') or f.endswith('.m4a')):
-                try:
-                    os.remove(full)
-                    print(f"Удалён временный файл: {f}")
-                except:
-                    pass
+    def download_audio(self, url, video_title, extra_opts):
+        """Скачивает только аудио и конвертирует его в WAV в AUDIO_FOLDER."""
+        base_name = re.sub(r'[\\/:*?"<>|]', '_', video_title).strip() or 'audio'
+        outtmpl_audio = os.path.join(AUDIO_FOLDER, f'{base_name}.%(ext)s')
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': outtmpl_audio,
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'socket_timeout': 30,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'wav',
+                # Для WAV битрейт ('-b:a') неприменим — ffmpeg сам выберет
+                # PCM s16le; качество задаётся частотой дискретизации ниже.
+                'preferredquality': None,
+            }],
+        }
+        ydl_opts.update(extra_opts)
 
-    def find_final_video(self, folder):
-        """Ищет финальное объединённое видео .mp4 без '.f' в имени."""
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(url, download=True)
+
+        wav_file = os.path.join(AUDIO_FOLDER, f'{base_name}.wav')
+        if not os.path.exists(wav_file):
+            # Запасной вариант: любой свежий аудиофайл в папке конвертируем в WAV
+            fallback = self.find_latest_audio(AUDIO_FOLDER)
+            if not fallback:
+                raise Exception("Аудиофайл не найден после скачивания")
+            wav_file = self.convert_to_wav(fallback, os.path.splitext(fallback)[0] + '.wav')
+        return wav_file
+
+    def find_latest_audio(self, folder):
+        exts = ('.wav', '.m4a', '.mp3', '.opus', '.ogg', '.webm')
         candidates = []
         for f in os.listdir(folder):
-            if f.endswith('.mp4') and '.f' not in f:
-                full = os.path.join(folder, f)
-                candidates.append(full)
+            low = f.lower()
+            if not low.endswith(exts):
+                continue
+            if '.part' in f or re.search(r'\.f\d+\.[^.]+$', f):
+                continue  # временный файл yt-dlp
+            candidates.append(os.path.join(folder, f))
         if not candidates:
             return None
         return max(candidates, key=os.path.getmtime)
 
-    def find_audio_for_video(self, video_file):
-        """Ищет WAV файл, соответствующий видео (обычно в той же папке)."""
-        base = os.path.splitext(video_file)[0]
-        # Ищем WAV
-        wav_file = base + '.wav'
-        if os.path.exists(wav_file):
-            return wav_file
-        # Если WAV нет, ищем M4A и конвертируем (но yt-dlp должен создать WAV)
-        m4a_file = base + '.m4a'
-        if os.path.exists(m4a_file):
-            # Конвертируем M4A в WAV с помощью ffmpeg (на всякий случай)
-            import subprocess
-            wav_file = base + '.wav'
-            subprocess.run(['ffmpeg', '-i', m4a_file, wav_file], check=True, capture_output=True)
-            os.remove(m4a_file)
-            return wav_file
-        return None
+    def get_ffmpeg_path(self):
+        try:
+            import imageio_ffmpeg
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return shutil.which('ffmpeg') or 'ffmpeg'
+
+    def convert_to_wav(self, src, dst):
+        """Конвертирует аудиофайл в WAV (16 kHz mono) с помощью ffmpeg."""
+        ffmpeg = self.get_ffmpeg_path()
+        subprocess.run(
+            [ffmpeg, '-y', '-i', src, '-vn', '-acodec', 'pcm_s16le',
+             '-ar', '16000', '-ac', '1', dst],
+            check=True, capture_output=True,
+        )
+        if os.path.splitext(src)[1].lower() != '.wav':
+            os.remove(src)
+        return dst
+
+    def cleanup_temp_files(self, folder):
+        """Удаляет временные файлы yt-dlp (.fцифры.xxx и .part)."""
+        for f in os.listdir(folder):
+            full = os.path.join(folder, f)
+            if not os.path.isfile(full):
+                continue
+            # Временные файлы yt-dlp содержат '.f' перед идентификатором формата
+            # (например 'Title.f140.m4a') или не завершены ('.part').
+            is_temp = '.part' in f or re.search(r'\.f\d+\.[^.]+$', f) is not None
+            if is_temp:
+                try:
+                    os.remove(full)
+                    print(f"Удалён временный файл: {f}")
+                except OSError:
+                    pass
+
+    def find_final_video(self, folder):
+        """Ищет финальное объединённое видео без временных суффиксов yt-dlp."""
+        video_exts = ('.mp4', '.mkv', '.webm', '.mov', '.flv', '.m4v')
+        candidates = []
+        for f in os.listdir(folder):
+            low = f.lower()
+            if not low.endswith(video_exts):
+                continue
+            if '.part' in f or re.search(r'\.f\d+\.[^.]+$', f):
+                continue  # временный/незавершённый файл
+            candidates.append(os.path.join(folder, f))
+        if not candidates:
+            return None
+        return max(candidates, key=os.path.getmtime)
 
     def set(self, text, prog):
         self.root.after(0, lambda: self.status.set(text))
